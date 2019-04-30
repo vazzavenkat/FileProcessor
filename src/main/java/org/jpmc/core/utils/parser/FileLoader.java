@@ -36,6 +36,8 @@ public class FileLoader {
 	private String replacePattern="";
 	private Connection connection;
 	private String dilimiter=null;
+	private int totalFixedStrLength=0;
+	private String isFixedLengthRun="false";
 	public FileLoader(Connection connection) {
 		this.connection = connection;
 	}
@@ -46,18 +48,21 @@ public class FileLoader {
 	      File inputF = new File(inputFilePath);
 	      InputStream inputFS = new FileInputStream(inputF);
 	      BufferedReader br = new BufferedReader(new InputStreamReader(inputFS));
-	    /*  generatePattern();
-	      if(StringUtils.isEmpty(replacePattern))
-	      {
-	    	  logger.error("Please configure COLUMN_LENGTHS");
-	    	  br.close();
-	    	  return null;
-	      }*/
+	      isFixedLengthRun=FileProcessor.prop.getProperty("IS_FIXED_LENGTH_RUN");
+	      if(Boolean.parseBoolean(isFixedLengthRun)) {
+	    	  generatePattern();
+		      if(StringUtils.isEmpty(replacePattern))
+		      {
+		    	  logger.error("Please configure COLUMN_LENGTHS");
+		    	  br.close();
+		    	  return null;
+		      }
+	      }
 	      dilimiter=FileProcessor.prop.getProperty("DILIMITER");
 	      dilimiter=StringUtils.isNotBlank(dilimiter)?dilimiter:",";
-	      String headerRows=FileProcessor.prop.getProperty("FILE_HEADER_AVAILABLE");
-	      headerRows=StringUtils.isNotBlank(headerRows)?headerRows:"0";
-	      inputList = br.lines().skip(toInt(headerRows,"FILE_HEADER_AVAILABLE")).map(mapToItem).collect(Collectors.toList());
+			String rowsCountsToSkip=FileProcessor.prop.getProperty("SKIPPED_ROWS_COUNT");
+			rowsCountsToSkip=StringUtils.isNotBlank(rowsCountsToSkip)?rowsCountsToSkip:"0";
+	      inputList = br.lines().skip(toInt(rowsCountsToSkip,"SKIPPED_ROWS_COUNT")).map(mapToItem).collect(Collectors.toList());
 	      br.close();
 	    } catch (IOException e) {
 	    }
@@ -65,10 +70,18 @@ public class FileLoader {
 	}
 	
 	private Function<String, String[]> mapToItem = (line) -> {
-		 String[] p = line.split(dilimiter);
-		 /*
-		  String[] p = line.replaceAll(regPattern,replacePattern).split("-");*/
-		  return p;
+		if(Boolean.parseBoolean(isFixedLengthRun)) {
+		  if(line.length()==totalFixedStrLength) {
+		  String[] p = line.replaceAll(regPattern,replacePattern).split("#");
+		  	return p;
+		  }else {
+			  logger.error("invalid record...lines starts :"+line.substring(0, 20));
+		  return line.replaceAll(regPattern,replacePattern).split("#");
+		  }
+		}else {
+			String[] p = line.split(dilimiter);
+		  	return p;
+		}
 	};
 	
 	private void generatePattern() {
@@ -77,12 +90,14 @@ public class FileLoader {
 			logger.error("Please give fixed file column lengths");
 		}
 		String[] lengths=fixedStringLength.split(",");
+		logger.info("Column lengths Count : "+lengths.length);
 		regPattern=regPattern+"^";
 		for(int i=0;i<lengths.length;i++) {
 			regPattern=regPattern+"(.{"+lengths[i]+"})";
 			replacePattern=replacePattern+"$"+(i+1);
+			totalFixedStrLength=totalFixedStrLength+Integer.parseInt(lengths[i]);
 			if(i != lengths.length-1)
-				replacePattern=replacePattern+"-";
+				replacePattern=replacePattern+"#";
 		}
 		regPattern=regPattern+".*";
 	}
@@ -108,9 +123,7 @@ public class FileLoader {
 					}else {
 						headerRow=columns.split(",");
 					}
-					String rowsCountsToSkip=FileProcessor.prop.getProperty("SKIPPED_ROWS_COUNT");
-					isHeaderAvailable=StringUtils.isNotBlank(rowsCountsToSkip)?rowsCountsToSkip:"0";
-					count=toInt(rowsCountsToSkip,"SKIPPED_ROWS_COUNT")+1;
+
 				}else {
 					headerRow=rows.get(toInt(isHeaderAvailable,"HEADER_ROW_NUMBER"));
 					count=toInt(isHeaderAvailable,"HEADER_ROW_NUMBER")+1;
@@ -131,18 +144,21 @@ public class FileLoader {
 		String query = SQL_INSERT.replaceFirst(TABLE_REGEX, tableName);
 		query = query
 				.replaceFirst(KEYS_REGEX, StringUtils.join(headerRow, ","));
+		logger.debug("header colums  length :"+headerRow.length);
+
 		query = query.replaceFirst(VALUES_REGEX, questionmarks);
 
 		System.out.println("Query: " + query);
 
-		databaseLoad(truncateBeforeLoad, tableName, rows, count, query);
+		databaseLoad(truncateBeforeLoad, tableName, rows, count, query,headerRow.length);
 	}
 
-	private void databaseLoad(boolean truncateBeforeLoad, String tableName, List<String[]> rows, int count, String query)
+	private void databaseLoad(boolean truncateBeforeLoad, String tableName, List<String[]> rows, int count, String query,int length)
 			throws SQLException, Exception {
 		String[] nextLine;
 		Connection con = null;
 		PreparedStatement ps = null;
+		int completedRows=0;
 		try {
 			con = this.connection;
 			con.setAutoCommit(false);
@@ -158,16 +174,27 @@ public class FileLoader {
 			while ((count != rows.size() &&  (nextLine = rows.get(count)) != null)) {
 				if (null != nextLine) {
 					int index = 1;
-					for (String string : nextLine) {
-						//date = DateUtil.convertToDate(string);
-						if (null != date) {
-							ps.setDate(index++, new java.sql.Date(date
-									.getTime()));
-						} else {
-							ps.setString(index++, string.trim());
+					/*logger.info("====>"+StringUtils.join(nextLine,","));
+					logger.info("<===");*/
+					if(nextLine.length >= length) {
+						for (int j = 0; j < length; j++) {
+							//date = DateUtil.convertToDate(string);
+							String string = nextLine[j];
+							if (null != date) {
+								ps.setDate(index++, new java.sql.Date(date
+										.getTime()));
+							} else {
+								ps.setString(index++, string.trim());
+							}
 						}
+						completedRows++;
+						ps.addBatch();
 					}
-					ps.addBatch();
+					/*else{
+						logger.debug("skipped rows :"+nextLine[1]););
+						}*/
+
+					//ps.addBatch();
 				}
 				if (++count % batchSize == 0) {
 					ps.executeBatch();
@@ -175,6 +202,7 @@ public class FileLoader {
 			}
 			ps.executeBatch(); // insert remaining records
 			con.commit();
+			logger.info("Total Completed rows : "+completedRows);
 			logger.info("Processing Completed Time : "+DateUtil.convertToString(new Date()));
 			logger.info("Data Upload Completed Successfully");
 		} catch (Exception e) {
